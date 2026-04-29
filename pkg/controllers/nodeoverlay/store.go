@@ -135,14 +135,13 @@ func (s *internalInstanceTypeStore) apply(nodePoolName string, it *cloudprovider
 		Name:         it.Name,
 		Requirements: it.Requirements, // Shared - never modified
 		Overhead:     it.Overhead,     // Shared - never modified
+		Capacity:     it.Capacity,
 	}
 
-	// Handle capacity overlay - only deep copy if we're modifying it
+	// Handle capacity overlay - only copy if we're modifying it
 	if len(lo.Keys(instanceTypeUpdate.Capacity.OverlayUpdate)) != 0 {
-		overriddenInstanceType.Capacity = it.Capacity.DeepCopy()
+		// This method replaces overriddenInstanceType.Capacity with a shallow copy
 		overriddenInstanceType.ApplyCapacityOverlay(instanceTypeUpdate.Capacity.OverlayUpdate)
-	} else {
-		overriddenInstanceType.Capacity = it.Capacity // Shared - not modified
 	}
 
 	// Handle offerings - copy-on-write only for offerings that need price overlay
