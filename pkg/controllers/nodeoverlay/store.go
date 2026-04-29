@@ -39,8 +39,9 @@ type capacityUpdate struct {
 }
 
 type instanceTypeUpdate struct {
-	Price    map[string]*priceUpdate
-	Capacity *capacityUpdate
+	Price              map[string]*priceUpdate
+	Capacity           *capacityUpdate
+	cachedInstanceType *cloudprovider.InstanceType
 }
 type InstanceTypeStore struct {
 	store atomic.Pointer[internalInstanceTypeStore]
@@ -61,7 +62,7 @@ func (s *InstanceTypeStore) UpdateStore(updatedStore *internalInstanceTypeStore)
 func (s *InstanceTypeStore) ApplyAll(nodePoolName string, its []*cloudprovider.InstanceType) ([]*cloudprovider.InstanceType, error) {
 	internalStore := lo.FromPtr(s.store.Load())
 
-	if !lo.Contains(internalStore.evaluatedNodePools.UnsortedList(), nodePoolName) {
+	if !internalStore.evaluatedNodePools.Has(nodePoolName) {
 		return []*cloudprovider.InstanceType{}, cloudprovider.NewUnevaluatedNodePoolError(nodePoolName)
 	}
 
@@ -82,6 +83,10 @@ func (s *InstanceTypeStore) ApplyAll(nodePoolName string, its []*cloudprovider.I
 
 func (s *InstanceTypeStore) Apply(nodePoolName string, it *cloudprovider.InstanceType) (*cloudprovider.InstanceType, error) {
 	internalStore := lo.FromPtr(s.store.Load())
+
+	if !internalStore.evaluatedNodePools.Has(nodePoolName) {
+		return &cloudprovider.InstanceType{}, cloudprovider.NewUnevaluatedNodePoolError(nodePoolName)
+	}
 
 	updatedIt, err := internalStore.apply(nodePoolName, it)
 	if err != nil {
@@ -115,12 +120,8 @@ func newInternalInstanceTypeStore() *internalInstanceTypeStore {
 // with any stored updates applied. It uses a selective copy-on-write strategy to minimize memory usage:
 // - Shared: Requirements and Overhead (never modified, safe to share)
 // - Selective copy: Offerings (only copied if price overlay applied)
-// - Selective copy: Capacity (only deep copied if capacity overlay applied)
+// - Selective copy: Capacity (only copied if capacity overlay applied)
 func (s *internalInstanceTypeStore) apply(nodePoolName string, it *cloudprovider.InstanceType) (*cloudprovider.InstanceType, error) {
-	if !lo.Contains(s.evaluatedNodePools.UnsortedList(), nodePoolName) {
-		return &cloudprovider.InstanceType{}, cloudprovider.NewUnevaluatedNodePoolError(nodePoolName)
-	}
-
 	instanceTypeList, ok := s.updates[nodePoolName]
 	if !ok {
 		return it, nil
@@ -128,6 +129,10 @@ func (s *internalInstanceTypeStore) apply(nodePoolName string, it *cloudprovider
 	instanceTypeUpdate, ok := instanceTypeList[it.Name]
 	if !ok {
 		return it, nil
+	}
+
+	if instanceTypeUpdate.cachedInstanceType != nil {
+		return instanceTypeUpdate.cachedInstanceType, nil
 	}
 
 	// Create a shallow copy of the instance type, sharing immutable fields
@@ -139,7 +144,7 @@ func (s *internalInstanceTypeStore) apply(nodePoolName string, it *cloudprovider
 	}
 
 	// Handle capacity overlay - only copy if we're modifying it
-	if len(lo.Keys(instanceTypeUpdate.Capacity.OverlayUpdate)) != 0 {
+	if len(instanceTypeUpdate.Capacity.OverlayUpdate) != 0 {
 		// This method replaces overriddenInstanceType.Capacity with a shallow copy
 		overriddenInstanceType.ApplyCapacityOverlay(instanceTypeUpdate.Capacity.OverlayUpdate)
 	}
@@ -150,6 +155,8 @@ func (s *internalInstanceTypeStore) apply(nodePoolName string, it *cloudprovider
 	} else {
 		overriddenInstanceType.Offerings = it.Offerings // Shared - not modified
 	}
+
+	instanceTypeUpdate.cachedInstanceType = overriddenInstanceType
 
 	return overriddenInstanceType, nil
 }
@@ -209,9 +216,9 @@ func (i *internalInstanceTypeStore) updateInstanceTypeCapacity(nodePoolName stri
 
 			i.updates[nodePoolName][instanceTypeName].Capacity.OverlayUpdate[resource] = quantity
 		}
-
 		i.updates[nodePoolName][instanceTypeName].Capacity.lowestWeightCapacityResources = nodeOverlay.Spec.Capacity
 		i.updates[nodePoolName][instanceTypeName].Capacity.lowestWeight = nodeOverlay.Spec.Weight
+		i.updates[nodePoolName][instanceTypeName].cachedInstanceType = nil
 	}
 }
 
@@ -268,6 +275,7 @@ func (i *internalInstanceTypeStore) updateInstanceTypeOffering(nodePoolName stri
 			lowestWeight:  nodeOverlay.Spec.Weight,
 		}
 	}
+	i.updates[nodePoolName][instanceTypeName].cachedInstanceType = nil
 }
 
 func (i *internalInstanceTypeStore) isOfferingUpdateConflicting(nodePoolName string, instanceTypeName string, of *cloudprovider.Offering, nodeOverlay v1alpha1.NodeOverlay) bool {
